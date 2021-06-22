@@ -15,23 +15,24 @@
  */
 package com.github.tomakehurst.wiremock.http;
 
-import com.github.tomakehurst.wiremock.common.KeyStoreSettings;
+import com.github.tomakehurst.wiremock.common.ssl.KeyStoreSettings;
 import com.github.tomakehurst.wiremock.common.ProxySettings;
 import com.github.tomakehurst.wiremock.global.GlobalSettingsHolder;
 import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
 import com.google.common.collect.ImmutableList;
 import org.apache.http.*;
-import org.apache.http.client.HttpClient;
 import org.apache.http.client.entity.GzipCompressingEntity;
 import org.apache.http.client.methods.*;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.InputStreamEntity;
 import org.apache.http.entity.ByteArrayEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
 
+import javax.net.ssl.SSLException;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.net.URI;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -40,23 +41,45 @@ import static com.github.tomakehurst.wiremock.http.RequestMethod.POST;
 import static com.github.tomakehurst.wiremock.http.RequestMethod.PUT;
 import static com.github.tomakehurst.wiremock.http.RequestMethod.PATCH;
 import static com.github.tomakehurst.wiremock.http.Response.response;
+import static java.net.HttpURLConnection.HTTP_INTERNAL_ERROR;
 
 public class ProxyResponseRenderer implements ResponseRenderer {
 
     private static final int MINUTES = 1000 * 60;
+    private static final int DEFAULT_SO_TIMEOUT = 5 * MINUTES;
+
     private static final String TRANSFER_ENCODING = "transfer-encoding";
     private static final String CONTENT_ENCODING = "content-encoding";
     private static final String CONTENT_LENGTH = "content-length";
     private static final String HOST_HEADER = "host";
+    public static final ImmutableList<String> FORBIDDEN_RESPONSE_HEADERS = ImmutableList.of(
+            TRANSFER_ENCODING,
+            "connection"
+    );
+    public static final ImmutableList<String> FORBIDDEN_REQUEST_HEADERS = ImmutableList.of(
+            CONTENT_LENGTH,
+            TRANSFER_ENCODING,
+            "connection"
+    );
 
-    private final HttpClient client;
+    private final CloseableHttpClient reverseProxyClient;
+    private final CloseableHttpClient forwardProxyClient;
     private final boolean preserveHostHeader;
     private final String hostHeaderValue;
     private final GlobalSettingsHolder globalSettingsHolder;
-	
-	public ProxyResponseRenderer(ProxySettings proxySettings, KeyStoreSettings trustStoreSettings, boolean preserveHostHeader, String hostHeaderValue, GlobalSettingsHolder globalSettingsHolder) {
+
+    public ProxyResponseRenderer(
+        ProxySettings proxySettings,
+        KeyStoreSettings trustStoreSettings,
+        boolean preserveHostHeader,
+        String hostHeaderValue,
+        GlobalSettingsHolder globalSettingsHolder,
+        boolean trustAllProxyTargets,
+        List<String> trustedProxyTargets
+    ) {
         this.globalSettingsHolder = globalSettingsHolder;
-        client = HttpClientFactory.createClient(1000, 5 * MINUTES, proxySettings, trustStoreSettings);
+        reverseProxyClient = HttpClientFactory.createClient(1000, DEFAULT_SO_TIMEOUT, proxySettings, trustStoreSettings, true, Collections.<String>emptyList(), true);
+        forwardProxyClient = HttpClientFactory.createClient(1000, DEFAULT_SO_TIMEOUT, proxySettings, trustStoreSettings, trustAllProxyTargets, trustAllProxyTargets ? Collections.emptyList() : trustedProxyTargets, false);
 
         this.preserveHostHeader = preserveHostHeader;
         this.hostHeaderValue = hostHeaderValue;
@@ -68,10 +91,9 @@ public class ProxyResponseRenderer implements ResponseRenderer {
         HttpUriRequest httpRequest = getHttpRequestFor(responseDefinition);
         addRequestHeaders(httpRequest, responseDefinition);
 
-		try {
-			addBodyIfPostPutOrPatch(httpRequest, responseDefinition);
-			HttpResponse httpResponse = client.execute(httpRequest);
-
+        addBodyIfPostPutOrPatch(httpRequest, responseDefinition);
+        CloseableHttpClient client = buildClient(serveEvent.getRequest().isBrowserProxyRequest());
+        try (CloseableHttpResponse httpResponse = client.execute(httpRequest)) {
             return response()
                     .status(httpResponse.getStatusLine().getStatusCode())
                     .headers(headersFrom(httpResponse, responseDefinition))
@@ -85,15 +107,35 @@ public class ProxyResponseRenderer implements ResponseRenderer {
                     )
                     .chunkedDribbleDelay(responseDefinition.getChunkedDribbleDelay())
                     .build();
-		} catch (IOException e) {
-			throw new RuntimeException(e);
-		}
+        } catch (SSLException e) {
+            return proxyResponseError("SSL", httpRequest, e);
+        } catch (IOException e) {
+            return proxyResponseError("Network", httpRequest, e);
+        }
 	}
 
+
+    private Response proxyResponseError(String type, HttpUriRequest request, Exception e) {
+        return response()
+                .status(HTTP_INTERNAL_ERROR)
+                .body((type + " failure trying to make a proxied request from WireMock to " + request.getURI()) + "\r\n" + e.getMessage())
+                .build();
+    }
+
+    private CloseableHttpClient buildClient(boolean browserProxyRequest) {
+	    if (browserProxyRequest) {
+            return forwardProxyClient;
+        } else {
+            return reverseProxyClient;
+        }
+    }
+
     private HttpHeaders headersFrom(HttpResponse httpResponse, ResponseDefinition responseDefinition) {
-	    List<HttpHeader> httpHeaders = new LinkedList<HttpHeader>();
+	    List<HttpHeader> httpHeaders = new LinkedList<>();
 	    for (Header header : httpResponse.getAllHeaders()) {
-		    httpHeaders.add(new HttpHeader(header.getName(), header.getValue()));
+	        if (responseHeaderShouldBeTransferred(header.getName())) {
+                httpHeaders.add(new HttpHeader(header.getName(), header.getValue()));
+            }
 	    }
 
         if (responseDefinition.getHeaders() != null) {
@@ -112,7 +154,7 @@ public class ProxyResponseRenderer implements ResponseRenderer {
 	private void addRequestHeaders(HttpRequest httpRequest, ResponseDefinition response) {
 		Request originalRequest = response.getOriginalRequest(); 
 		for (String key: originalRequest.getAllHeaderKeys()) {
-			if (headerShouldBeTransferred(key)) {
+			if (requestHeaderShouldBeTransferred(key)) {
                 if (!HOST_HEADER.equalsIgnoreCase(key) || preserveHostHeader) {
 					List<String> values = originalRequest.header(key).values();
 					for (String value: values) {
@@ -135,11 +177,16 @@ public class ProxyResponseRenderer implements ResponseRenderer {
 		}
 	}
 
-    private static boolean headerShouldBeTransferred(String key) {
-        return !ImmutableList.of(CONTENT_LENGTH, TRANSFER_ENCODING, "connection").contains(key.toLowerCase());
+    private static boolean requestHeaderShouldBeTransferred(String key) {
+        return !FORBIDDEN_REQUEST_HEADERS.contains(key.toLowerCase());
     }
 
-    private static void addBodyIfPostPutOrPatch(HttpRequest httpRequest, ResponseDefinition response) throws UnsupportedEncodingException {
+    private static boolean responseHeaderShouldBeTransferred(String key) {
+        final String lowerCaseKey = key.toLowerCase();
+        return !FORBIDDEN_RESPONSE_HEADERS.contains(lowerCaseKey) && !lowerCaseKey.startsWith("access-control");
+    }
+
+    private static void addBodyIfPostPutOrPatch(HttpRequest httpRequest, ResponseDefinition response) {
 		Request originalRequest = response.getOriginalRequest();
 		if (originalRequest.getMethod().isOneOf(PUT, POST, PATCH)) {
 			HttpEntityEnclosingRequest requestWithEntity = (HttpEntityEnclosingRequest) httpRequest;

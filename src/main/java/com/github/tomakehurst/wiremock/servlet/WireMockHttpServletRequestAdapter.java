@@ -23,10 +23,10 @@ import com.github.tomakehurst.wiremock.http.HttpHeaders;
 import com.github.tomakehurst.wiremock.http.QueryParameter;
 import com.github.tomakehurst.wiremock.http.Request;
 import com.github.tomakehurst.wiremock.http.RequestMethod;
+import com.github.tomakehurst.wiremock.http.multipart.PartParser;
 import com.github.tomakehurst.wiremock.jetty9.JettyUtils;
-import com.google.common.base.Function;
+import com.google.common.base.*;
 import com.google.common.base.Optional;
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Maps;
@@ -56,6 +56,7 @@ public class WireMockHttpServletRequestAdapter implements Request {
     private final HttpServletRequest request;
     private final MultipartRequestConfigurer multipartRequestConfigurer;
     private byte[] cachedBody;
+    private final Supplier<Map<String, QueryParameter>> cachedQueryParams;
     private String urlPrefixToRemove;
     private Collection<Part> cachedMultiparts;
 
@@ -65,6 +66,13 @@ public class WireMockHttpServletRequestAdapter implements Request {
         this.request = request;
         this.multipartRequestConfigurer = multipartRequestConfigurer;
         this.urlPrefixToRemove = urlPrefixToRemove;
+
+        cachedQueryParams = Suppliers.memoize(new Supplier<Map<String, QueryParameter>>() {
+            @Override
+            public Map<String, QueryParameter> get() {
+                return splitQuery(request.getQueryString());
+            }
+        });
     }
 
     @Override
@@ -241,9 +249,11 @@ public class WireMockHttpServletRequestAdapter implements Request {
 
     @Override
     public QueryParameter queryParameter(String key) {
-        return firstNonNull((splitQuery(request.getQueryString())
-                .get(key)),
-            QueryParameter.absent(key));
+        Map<String, QueryParameter> queryParams = cachedQueryParams.get();
+        return firstNonNull(
+                queryParams.get(key),
+                QueryParameter.absent(key)
+        );
     }
 
     @Override
@@ -253,46 +263,23 @@ public class WireMockHttpServletRequestAdapter implements Request {
         }
         if (request instanceof org.eclipse.jetty.server.Request) {
             org.eclipse.jetty.server.Request jettyRequest = (org.eclipse.jetty.server.Request) request;
-            return JettyUtils.getUri(jettyRequest).isAbsolute();
+            return JettyUtils.uriIsAbsolute(jettyRequest);
         }
 
         return false;
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public Collection<Part> getParts() {
         if (!isMultipart()) {
             return null;
         }
 
         if (cachedMultiparts == null) {
-            try {
-                multipartRequestConfigurer.configure(request);
-                cachedMultiparts = from(safelyGetRequestParts()).transform(new Function<javax.servlet.http.Part, Part>() {
-                    @Override
-                    public Part apply(javax.servlet.http.Part input) {
-                        return WireMockHttpServletMultipartAdapter.from(input);
-                    }
-                }).toList();
-            } catch (IOException | ServletException exception) {
-                return throwUnchecked(exception, Collection.class);
-            }
+            cachedMultiparts = PartParser.parseFrom(this);
         }
 
         return (cachedMultiparts.size() > 0) ? cachedMultiparts : null;
-    }
-
-    private Collection<javax.servlet.http.Part> safelyGetRequestParts() throws IOException, ServletException {
-        try {
-            return request.getParts();
-        } catch (IOException ioe) {
-            if (ioe.getMessage().contains("Missing content for multipart")) {
-                return Collections.emptyList();
-            }
-
-            throw ioe;
-        }
     }
 
     @Override

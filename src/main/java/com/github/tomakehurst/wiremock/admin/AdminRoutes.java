@@ -89,6 +89,9 @@ public class AdminRoutes {
         router.add(GET,  "/requests/unmatched", FindUnmatchedRequestsTask.class);
         router.add(GET,  "/requests/unmatched/near-misses", FindNearMissesForUnmatchedTask.class);
         router.add(GET,  "/requests/{id}", GetServedStubTask.class);
+        router.add(DELETE, "/requests/{id}", RemoveServeEventTask.class);
+        router.add(POST, "/requests/remove", RemoveServeEventsByRequestPatternTask.class);
+        router.add(POST, "/requests/remove-by-metadata", RemoveServeEventsByStubMetadataTask.class);
 
         router.add(POST, "/recordings/snapshot", SnapshotTask.class);
         router.add(POST, "/recordings/start", StartRecordingTask.class);
@@ -108,6 +111,8 @@ public class AdminRoutes {
 
         router.add(GET, "/docs/swagger", GetSwaggerSpecTask.class);
         router.add(GET, "/docs", GetDocIndexTask.class);
+
+        router.add(GET, "/certs/wiremock-ca.crt", GetCaCertTask.class);
     }
 
     protected void initAdditionalRoutes(Router routeBuilder) {

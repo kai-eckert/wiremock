@@ -31,7 +31,7 @@ import java.util.List;
 
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 
-public class WireMockRule extends WireMockServer implements MethodRule, TestRule {
+public class WireMockRule extends WireMockServer implements TestRule {
 
     private final boolean failOnUnmatchedRequests;
 
@@ -58,16 +58,17 @@ public class WireMockRule extends WireMockServer implements MethodRule, TestRule
 
     @Override
     public Statement apply(final Statement base, Description description) {
-        return apply(base, null, null);
-    }
-
-	@Override
-	public Statement apply(final Statement base, FrameworkMethod method, Object target) {
 		return new Statement() {
 			@Override
 			public void evaluate() throws Throwable {
 				start();
-				WireMock.configureFor("localhost", port());
+
+				if (options.getHttpDisabled()) {
+                    WireMock.configureFor("https", "localhost", httpsPort());
+                } else {
+                    WireMock.configureFor("localhost", port());
+                }
+
 				try {
                     before();
                     base.evaluate();

@@ -49,7 +49,7 @@ import static java.util.Collections.singletonList;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
 
 public class Examples extends AcceptanceTestBase {
 
@@ -373,6 +373,9 @@ public class Examples extends AcceptanceTestBase {
         WireMockConfiguration.options()
             // Statically set the HTTP port number. Defaults to 8080.
             .port(8000)
+
+            // Disable HTTP listener.
+            .httpDisabled(true)
 
             // Statically set the HTTPS port number. Defaults to 8443.
             .httpsPort(8001)

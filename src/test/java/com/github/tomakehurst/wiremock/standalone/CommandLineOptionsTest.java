@@ -17,10 +17,12 @@ package com.github.tomakehurst.wiremock.standalone;
 
 import com.github.tomakehurst.wiremock.client.BasicCredentials;
 import com.github.tomakehurst.wiremock.common.FileSource;
+import com.github.tomakehurst.wiremock.common.ssl.KeyStoreSettings;
 import com.github.tomakehurst.wiremock.common.ProxySettings;
 import com.github.tomakehurst.wiremock.core.Options;
 import com.github.tomakehurst.wiremock.extension.Parameters;
 import com.github.tomakehurst.wiremock.extension.ResponseDefinitionTransformer;
+import com.github.tomakehurst.wiremock.extension.StubLifecycleListener;
 import com.github.tomakehurst.wiremock.extension.responsetemplating.ResponseTemplateTransformer;
 import com.github.tomakehurst.wiremock.http.CaseInsensitiveKey;
 import com.github.tomakehurst.wiremock.http.Request;
@@ -32,12 +34,18 @@ import com.github.tomakehurst.wiremock.security.Authenticator;
 import com.google.common.base.Optional;
 import org.junit.Test;
 
+import java.util.Collections;
 import java.util.Map;
 
-import static com.github.tomakehurst.wiremock.common.ProxySettings.NO_PROXY;
+import static com.github.tomakehurst.wiremock.common.BrowserProxySettings.DEFAULT_CA_KESTORE_PASSWORD;
+import static com.github.tomakehurst.wiremock.common.BrowserProxySettings.DEFAULT_CA_KEYSTORE_PATH;
 import static com.github.tomakehurst.wiremock.matching.MockRequest.mockRequest;
+import static com.github.tomakehurst.wiremock.testsupport.WireMatchers.matchesMultiLine;
+import static java.util.Arrays.asList;
+import static java.util.Collections.singletonList;
 import static org.hamcrest.Matchers.*;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertSame;
 
 public class CommandLineOptionsTest {
 
@@ -79,6 +87,13 @@ public class CommandLineOptionsTest {
     }
 
     @Test
+    public void disablesHttpWhenOptionPresentAndHttpsEnabled() {
+        CommandLineOptions options = new CommandLineOptions("--disable-http",
+                "--https-port", "8443");
+        assertThat(options.getHttpDisabled(), is(true));
+    }
+
+    @Test
     public void enablesHttpsAndSetsPortNumberWhenOptionPresent() {
         CommandLineOptions options = new CommandLineOptions("--https-port", "8443");
         assertThat(options.httpsSettings().enabled(), is(true));
@@ -101,25 +116,40 @@ public class CommandLineOptionsTest {
     }
 
     @Test
-    public void setsTrustStorePathAndPassword() {
-        CommandLineOptions options = new CommandLineOptions("--https-port", "8443",
+    public void setsTrustStoreOptions() {
+        CommandLineOptions options = new CommandLineOptions(
+                "--https-port", "8443",
                 "--https-keystore", "/my/keystore",
                 "--https-truststore", "/my/truststore",
+                "--truststore-type", "PKCS12",
                 "--truststore-password", "sometrustpwd");
         assertThat(options.httpsSettings().trustStorePath(), is("/my/truststore"));
+        assertThat(options.httpsSettings().trustStoreType(), is("PKCS12"));
         assertThat(options.httpsSettings().trustStorePassword(), is("sometrustpwd"));
     }
 
     @Test
-    public void setsKeyStorePathAndPassword() {
-        CommandLineOptions options = new CommandLineOptions("--https-port", "8443", "--https-keystore", "/my/keystore", "--keystore-password", "someotherpwd");
-        assertThat(options.httpsSettings().keyStorePath(), is("/my/keystore"));
-        assertThat(options.httpsSettings().keyStorePassword(), is("someotherpwd"));
+    public void defaultsTrustStorePasswordIfNotSpecified() {
+        CommandLineOptions options = new CommandLineOptions(
+                "--https-keystore", "/my/keystore",
+                "--https-truststore", "/my/truststore"
+        );
+        assertThat(options.httpsSettings().trustStorePassword(), is("password"));
     }
 
-    @Test(expected=IllegalArgumentException.class)
-    public void throwsExceptionIfKeyStoreSpecifiedWithoutHttpsPort() {
-        new CommandLineOptions("--https-keystore", "/my/keystore");
+    @Test
+    public void setsHttpsKeyStorePathOptions() {
+        CommandLineOptions options = new CommandLineOptions(
+                "--https-port", "8443",
+                "--https-keystore", "/my/keystore",
+                "--keystore-type", "pkcs12",
+                "--keystore-password", "someotherpwd",
+                "--key-manager-password", "keymanpass"
+        );
+        assertThat(options.httpsSettings().keyStorePath(), is("/my/keystore"));
+        assertThat(options.httpsSettings().keyStoreType(), is("pkcs12"));
+        assertThat(options.httpsSettings().keyStorePassword(), is("someotherpwd"));
+        assertThat(options.httpsSettings().keyManagerPassword(), is("keymanpass"));
     }
 
 	@Test(expected=Exception.class)
@@ -155,7 +185,15 @@ public class CommandLineOptionsTest {
 	public void returnsBrowserProxyingEnabledWhenOptionSet() {
 		CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying");
 		assertThat(options.browserProxyingEnabled(), is(true));
+		assertThat(options.browserProxySettings().enabled(), is(true));
 	}
+
+    @Test
+    public void returnsBrowserProxyingDisabledWhenOptionNoSet() {
+        CommandLineOptions options = new CommandLineOptions();
+        assertThat(options.browserProxyingEnabled(), is(false));
+        assertThat(options.browserProxySettings().enabled(), is(false));
+    }
 
 	@Test
 	public void setsAll() {
@@ -232,9 +270,9 @@ public class CommandLineOptionsTest {
     }
 
     @Test
-    public void defaultsContainerThreadsTo10() {
+    public void defaultsContainerThreadsTo25() {
         CommandLineOptions options = new CommandLineOptions();
-        assertThat(options.containerThreads(), is(10));
+        assertThat(options.containerThreads(), is(25));
     }
 
     @Test
@@ -259,6 +297,12 @@ public class CommandLineOptionsTest {
     public void returnsCorrectlyParsedJettyStopTimeout() {
         CommandLineOptions options = new CommandLineOptions("--jetty-stop-timeout", "1000");
         assertThat(options.jettySettings().getStopTimeout().get(), is(1000L));
+    }
+
+    @Test
+    public void returnsCorrectlyParsedJettyIdleTimeout() {
+        CommandLineOptions options = new CommandLineOptions("--jetty-idle-timeout", "2000");
+        assertThat(options.jettySettings().getIdleTimeout().get(), is(2000L));
     }
 
     @Test
@@ -394,15 +438,6 @@ public class CommandLineOptionsTest {
     }
 
     @Test
-    public void usesPortInToString() {
-        CommandLineOptions options = new CommandLineOptions("--port", "1337");
-        assertThat(options.toString(), allOf(containsString("1337")));
-
-        options.setResultingPort(1338);
-        assertThat(options.toString(), allOf(containsString("1338")));
-    }
-
-    @Test
     public void configuresMaxTemplateCacheEntriesIfSpecified() {
         CommandLineOptions options = new CommandLineOptions("--global-response-templating", "--max-template-cache-entries", "5");
         Map<String, ResponseTemplateTransformer> extensions = options.extensionsOfType(ResponseTemplateTransformer.class);
@@ -421,6 +456,18 @@ public class CommandLineOptionsTest {
     }
 
     @Test
+    public void configuresPermittedSystemKeysIfSpecified() {
+        CommandLineOptions options = new CommandLineOptions("--global-response-templating", "--permitted-system-keys", "java*,path*");
+        assertThat(options.getPermittedSystemKeys(), hasItems("java*", "path*"));
+    }
+
+    @Test
+    public void returnsEmptyPermittedKeysIfNotSpecified() {
+        CommandLineOptions options = new CommandLineOptions("--global-response-templating");
+        assertThat(options.getPermittedSystemKeys(), emptyCollectionOf(String.class));
+    }
+
+    @Test
     public void disablesGzip() {
         CommandLineOptions options = new CommandLineOptions("--disable-gzip");
         assertThat(options.getGzipDisabled(), is(true));
@@ -430,6 +477,125 @@ public class CommandLineOptionsTest {
     public void defaultsToGzipEnabled() {
         CommandLineOptions options = new CommandLineOptions();
         assertThat(options.getGzipDisabled(), is(false));
+    }
+
+    @Test
+    public void disablesRequestLogging() {
+	    CommandLineOptions options = new CommandLineOptions("--disable-request-logging");
+	    assertThat(options.getStubRequestLoggingDisabled(), is(true));
+    }
+
+    @Test
+    public void defaultsToRequestLoggingEnabled() {
+        CommandLineOptions options = new CommandLineOptions();
+        assertThat(options.getStubRequestLoggingDisabled(), is(false));
+    }
+
+    @Test
+    public void printsTheActualPortOnlyWhenHttpsDisabled() {
+	    CommandLineOptions options = new CommandLineOptions();
+	    options.setActualHttpPort(5432);
+
+	    String dump = options.toString();
+
+	    assertThat(dump, matchesMultiLine(".*port:.*5432.*"));
+	    assertThat(dump, not(containsString("https-port")));
+    }
+
+    @Test
+    public void enablesStubCors() {
+        CommandLineOptions options = new CommandLineOptions("--enable-stub-cors");
+        assertThat(options.getStubCorsEnabled(), is(true));
+    }
+
+    @Test
+    public void defaultsToNoStubCors() {
+        CommandLineOptions options = new CommandLineOptions();
+        assertThat(options.getStubCorsEnabled(), is(false));
+    }
+
+    @Test
+    public void trustAllProxyTargets() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying", "--trust-all-proxy-targets");
+        assertThat(options.browserProxySettings().trustAllProxyTargets(), is(true));
+    }
+
+    @Test
+    public void defaultsToNotTrustingAllProxyTargets() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying");
+        assertThat(options.browserProxySettings().trustAllProxyTargets(), is(false));
+    }
+
+    @Test
+    public void trustsOneProxyTarget1() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying", "--trust-proxy-target", "localhost");
+        assertThat(options.browserProxySettings().trustedProxyTargets(), is(singletonList("localhost")));
+    }
+
+    @Test
+    public void trustsManyProxyTargets() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying", "--trust-proxy-target=localhost", "--trust-proxy-target", "wiremock.org", "--trust-proxy-target=www.google.com");
+        assertThat(options.browserProxySettings().trustedProxyTargets(), is(asList("localhost", "wiremock.org", "www.google.com")));
+    }
+
+    @Test
+    public void defaultsToNoTrustedProxyTargets() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying");
+        assertThat(options.browserProxySettings().trustedProxyTargets(), is(Collections.<String>emptyList()));
+    }
+
+    @Test
+    public void setsCaKeyStorePathAndPassword() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying", "--ca-keystore", "/my/keystore", "--ca-keystore-password", "someotherpwd", "--ca-keystore-type", "pkcs12");
+        KeyStoreSettings caKeyStore = options.browserProxySettings().caKeyStore();
+        assertThat(caKeyStore.path(), is("/my/keystore"));
+        assertThat(caKeyStore.password(), is("someotherpwd"));
+        assertThat(caKeyStore.type(), is("pkcs12"));
+    }
+
+    @Test
+    public void defaultsCaKeyStorePathAndPassword() {
+        CommandLineOptions options = new CommandLineOptions("--enable-browser-proxying");
+        KeyStoreSettings caKeyStore = options.browserProxySettings().caKeyStore();
+        assertThat(caKeyStore.path(), is(DEFAULT_CA_KEYSTORE_PATH));
+        assertThat(caKeyStore.password(), is(DEFAULT_CA_KESTORE_PASSWORD));
+        assertThat(caKeyStore.type(), is("jks"));
+    }
+
+    @Test
+    public void printsBothActualPortsOnlyWhenHttpsEnabled() {
+	    CommandLineOptions options = new CommandLineOptions();
+	    options.setActualHttpPort(5432);
+	    options.setActualHttpsPort(2345);
+
+	    String dump = options.toString();
+
+	    assertThat(dump, matchesMultiLine(".*port:.*5432.*"));
+	    assertThat(dump, matchesMultiLine(".*https-port:.*2345.*"));
+    }
+
+    @Test
+    public void toStringWithTrustAllProxyTargetsWorks() {
+        String options = new CommandLineOptions("--enable-browser-proxying", "--trust-all-proxy-targets").toString();
+        assertThat(options, matchesMultiLine(".*enable-browser-proxying: *true.*"));
+        assertThat(options, matchesMultiLine(".*trust-all-proxy-targets: *true.*"));
+    }
+
+    @Test
+    public void toStringWithTrustProxyTarget() {
+        String options = new CommandLineOptions("--enable-browser-proxying", "--trust-proxy-target", "localhost", "--trust-proxy-target", "example.com").toString();
+        assertThat(options, matchesMultiLine(".*enable-browser-proxying: *true.*"));
+        assertThat(options, matchesMultiLine(".*trust-proxy-target: *localhost, example\\.com.*"));
+    }
+
+    @Test
+    public void returnsTheSameInstanceOfTemplatingExtensionForEveryInterfaceImplemented() {
+        CommandLineOptions options = new CommandLineOptions("--local-response-templating");
+
+        Object one = options.extensionsOfType(StubLifecycleListener.class).get(ResponseTemplateTransformer.NAME);
+        Object two = options.extensionsOfType(ResponseDefinitionTransformer.class).get(ResponseTemplateTransformer.NAME);
+
+        assertSame(one, two);
     }
 
     public static class ResponseDefinitionTransformerExt1 extends ResponseDefinitionTransformer {

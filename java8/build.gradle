@@ -1,5 +1,0 @@
-jar.baseName = 'wiremock-jre8'
-shadowJar.baseName = 'wiremock-jre8-standalone'
-
-sourceCompatibility = 1.8
-targetCompatibility = 1.8

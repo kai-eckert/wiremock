@@ -15,32 +15,44 @@
  */
 package com.github.tomakehurst.wiremock.http;
 
-import com.github.tomakehurst.wiremock.common.KeyStoreSettings;
+import com.github.tomakehurst.wiremock.common.ssl.KeyStoreSettings;
 import com.github.tomakehurst.wiremock.common.ProxySettings;
+import com.github.tomakehurst.wiremock.http.ssl.HostVerifyingSSLSocketFactory;
+import com.github.tomakehurst.wiremock.http.ssl.SSLContextBuilder;
+import com.github.tomakehurst.wiremock.http.ssl.TrustEverythingStrategy;
+import com.github.tomakehurst.wiremock.http.ssl.TrustSelfSignedStrategy;
+import com.github.tomakehurst.wiremock.http.ssl.TrustSpecificHostsStrategy;
 import org.apache.http.HttpHost;
+import org.apache.http.HttpResponse;
 import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.AuthenticationStrategy;
-import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.*;
 import org.apache.http.config.SocketConfig;
-import org.apache.http.conn.ssl.AllowAllHostnameVerifier;
-import org.apache.http.conn.ssl.SSLContexts;
-import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
-import org.apache.http.conn.ssl.TrustStrategy;
+import org.apache.http.conn.ConnectionKeepAliveStrategy;
+import org.apache.http.conn.socket.LayeredConnectionSocketFactory;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.impl.NoConnectionReuseStrategy;
 import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.ProxyAuthenticationStrategy;
+import org.apache.http.protocol.HttpContext;
+import org.apache.http.util.TextUtils;
 
 import javax.net.ssl.SSLContext;
+import java.security.KeyManagementException;
 import java.security.KeyStore;
-import java.security.cert.CertificateException;
-import java.security.cert.X509Certificate;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableEntryException;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
 
 import static com.github.tomakehurst.wiremock.common.Exceptions.throwUnchecked;
-import static com.github.tomakehurst.wiremock.common.KeyStoreSettings.NO_STORE;
+import static com.github.tomakehurst.wiremock.common.ssl.KeyStoreSettings.NO_STORE;
 import static com.github.tomakehurst.wiremock.common.LocalNotifier.notifier;
 import static com.github.tomakehurst.wiremock.common.ProxySettings.NO_PROXY;
 import static com.github.tomakehurst.wiremock.http.RequestMethod.*;
@@ -51,11 +63,21 @@ public class HttpClientFactory {
     public static final int DEFAULT_MAX_CONNECTIONS = 50;
     public static final int DEFAULT_TIMEOUT = 30000;
 
+    private static final ConnectionKeepAliveStrategy NO_KEEP_ALIVE = new ConnectionKeepAliveStrategy() {
+        @Override
+        public long getKeepAliveDuration(HttpResponse response, HttpContext context) {
+            return 0;
+        }
+    };
+
     public static CloseableHttpClient createClient(
             int maxConnections,
             int timeoutMilliseconds,
             ProxySettings proxySettings,
-            KeyStoreSettings trustStoreSettings) {
+            KeyStoreSettings trustStoreSettings,
+            boolean trustSelfSignedCertificates,
+            final List<String> trustedHosts,
+            boolean useSystemProperties) {
 
         HttpClientBuilder builder = HttpClientBuilder.create()
                 .disableAuthCaching()
@@ -64,10 +86,15 @@ public class HttpClientFactory {
                 .disableRedirectHandling()
                 .disableContentCompression()
                 .setMaxConnTotal(maxConnections)
+                .setMaxConnPerRoute(maxConnections)
                 .setDefaultRequestConfig(RequestConfig.custom().setStaleConnectionCheckEnabled(true).build())
                 .setDefaultSocketConfig(SocketConfig.custom().setSoTimeout(timeoutMilliseconds).build())
-                .useSystemProperties()
-                .setHostnameVerifier(new AllowAllHostnameVerifier());
+                .setConnectionReuseStrategy(NoConnectionReuseStrategy.INSTANCE)
+                .setKeepAliveStrategy(NO_KEEP_ALIVE);
+
+        if (useSystemProperties) {
+            builder.useSystemProperties();
+        }
 
         if (proxySettings != NO_PROXY) {
             HttpHost proxyHost = new HttpHost(proxySettings.host(), proxySettings.port());
@@ -82,43 +109,107 @@ public class HttpClientFactory {
             }
         }
 
-        if (trustStoreSettings != NO_STORE) {
-            builder.setSslcontext(buildSSLContextWithTrustStore(trustStoreSettings));
-        } else {
-            builder.setSslcontext(buildAllowAnythingSSLContext());
-        }
+        final SSLContext sslContext = buildSslContext(trustStoreSettings, trustSelfSignedCertificates, trustedHosts);
+        LayeredConnectionSocketFactory sslSocketFactory = buildSslConnectionSocketFactory(sslContext);
+        builder.setSSLSocketFactory(sslSocketFactory);
 
         return builder.build();
 	}
 
-    private static SSLContext buildSSLContextWithTrustStore(KeyStoreSettings trustStoreSettings) {
+    private static LayeredConnectionSocketFactory buildSslConnectionSocketFactory(final SSLContext sslContext) {
+        final String[] supportedProtocols = split(System.getProperty("https.protocols"));
+        final String[] supportedCipherSuites = split(System.getProperty("https.cipherSuites"));
+
+        return new SSLConnectionSocketFactory(
+            new HostVerifyingSSLSocketFactory(sslContext.getSocketFactory()),
+            supportedProtocols,
+            supportedCipherSuites,
+            new NoopHostnameVerifier() // using Java's hostname verification
+        );
+    }
+
+    /**
+     * Copied from {@link HttpClientBuilder#split(String)} which is not
+     * the same as {@link org.apache.commons.lang3.StringUtils#split(String)}
+      */
+    private static String[] split(final String s) {
+        if (TextUtils.isBlank(s)) {
+            return null;
+        }
+        return s.split(" *, *");
+    }
+
+    private static SSLContext buildSslContext(
+        KeyStoreSettings trustStoreSettings,
+        boolean trustSelfSignedCertificates,
+        List<String> trustedHosts
+    ) {
+        if (trustStoreSettings != NO_STORE) {
+            return buildSSLContextWithTrustStore(trustStoreSettings, trustSelfSignedCertificates, trustedHosts);
+        } else if (trustSelfSignedCertificates) {
+            return buildAllowAnythingSSLContext();
+        } else {
+            try {
+                return SSLContextBuilder.create().loadTrustMaterial(new TrustSpecificHostsStrategy(trustedHosts)).build();
+            } catch (NoSuchAlgorithmException | KeyManagementException e) {
+                return throwUnchecked(e, null);
+            }
+        }
+    }
+
+    public static CloseableHttpClient createClient(
+            int maxConnections,
+            int timeoutMilliseconds,
+            ProxySettings proxySettings,
+            KeyStoreSettings trustStoreSettings,
+            boolean useSystemProperties) {
+        return createClient(maxConnections, timeoutMilliseconds, proxySettings, trustStoreSettings, true, Collections.<String>emptyList(), useSystemProperties);
+    }
+
+    private static SSLContext buildSSLContextWithTrustStore(KeyStoreSettings trustStoreSettings, boolean trustSelfSignedCertificates, List<String> trustedHosts) {
         try {
             KeyStore trustStore = trustStoreSettings.loadStore();
-            return SSLContexts.custom()
-                    .loadTrustMaterial(null, new TrustSelfSignedStrategy())
-                    .loadKeyMaterial(trustStore, trustStoreSettings.password().toCharArray())
-                    .useTLS()
+            SSLContextBuilder sslContextBuilder = SSLContextBuilder.create()
+                    .loadKeyMaterial(trustStore, trustStoreSettings.password().toCharArray());
+            if (trustSelfSignedCertificates) {
+                sslContextBuilder.loadTrustMaterial(new TrustSelfSignedStrategy());
+            } else if (containsCertificate(trustStore)) {
+                sslContextBuilder.loadTrustMaterial(trustStore, new TrustSpecificHostsStrategy(trustedHosts));
+            } else {
+                sslContextBuilder.loadTrustMaterial(new TrustSpecificHostsStrategy(trustedHosts));
+            }
+            return sslContextBuilder
                     .build();
         } catch (Exception e) {
             return throwUnchecked(e, SSLContext.class);
         }
     }
 
-    private static SSLContext buildAllowAnythingSSLContext() {
-        try {
-            return SSLContexts.custom().loadTrustMaterial(null, new TrustStrategy() {
-                @Override
-                public boolean isTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+    private static boolean containsCertificate(KeyStore trustStore) throws KeyStoreException {
+        Enumeration<String> aliases = trustStore.aliases();
+        while (aliases.hasMoreElements()) {
+            String alias = aliases.nextElement();
+            try {
+                if (trustStore.getEntry(alias, null) instanceof KeyStore.TrustedCertificateEntry) {
                     return true;
                 }
-            }).build();
+            } catch (NoSuchAlgorithmException | UnrecoverableEntryException e) {
+                // ignore
+            }
+        }
+        return false;
+    }
+
+    private static SSLContext buildAllowAnythingSSLContext() {
+        try {
+            return SSLContextBuilder.create().loadTrustMaterial(new TrustEverythingStrategy()).build();
         } catch (Exception e) {
-            return throwUnchecked(e, SSLContext.class);
+            return throwUnchecked(e, null);
         }
     }
 
     public static CloseableHttpClient createClient(int maxConnections, int timeoutMilliseconds) {
-        return createClient(maxConnections, timeoutMilliseconds, NO_PROXY, NO_STORE);
+        return createClient(maxConnections, timeoutMilliseconds, NO_PROXY, NO_STORE, true);
     }
 
 	public static CloseableHttpClient createClient(int timeoutMilliseconds) {
@@ -126,7 +217,7 @@ public class HttpClientFactory {
 	}
 
     public static CloseableHttpClient createClient(ProxySettings proxySettings) {
-        return createClient(DEFAULT_MAX_CONNECTIONS, DEFAULT_TIMEOUT, proxySettings, NO_STORE);
+        return createClient(DEFAULT_MAX_CONNECTIONS, DEFAULT_TIMEOUT, proxySettings, NO_STORE, true);
     }
 
     public static CloseableHttpClient createClient() {

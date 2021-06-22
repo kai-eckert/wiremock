@@ -16,6 +16,7 @@
 package com.github.tomakehurst.wiremock;
 
 import com.github.tomakehurst.wiremock.admin.model.*;
+import com.github.tomakehurst.wiremock.client.CountMatchingStrategy;
 import com.github.tomakehurst.wiremock.client.MappingBuilder;
 import com.github.tomakehurst.wiremock.client.WireMock;
 import com.github.tomakehurst.wiremock.common.FatalStartupException;
@@ -61,7 +62,7 @@ public class WireMockServer implements Container, Stubbing, Admin {
 	private final HttpServer httpServer;
 	private final Notifier notifier;
 
-    private final Options options;
+    protected final Options options;
 
     protected final WireMock client;
 
@@ -176,8 +177,8 @@ public class WireMockServer implements Container, Stubbing, Admin {
 
     public int port() {
         checkState(
-                isRunning(),
-                "Not listening on HTTP port. The WireMock server is most likely stopped"
+            isRunning() && !options.getHttpDisabled(),
+            "Not listening on HTTP port. Either HTTP is not enabled or the WireMock server is stopped."
         );
         return httpServer.port();
     }
@@ -268,6 +269,11 @@ public class WireMockServer implements Container, Stubbing, Admin {
     @Override
     public void verify(int count, RequestPatternBuilder requestPatternBuilder) {
         client.verifyThat(count, requestPatternBuilder);
+    }
+
+    @Override
+    public void verify(CountMatchingStrategy countMatchingStrategy, RequestPatternBuilder requestPatternBuilder) {
+        client.verifyThat(countMatchingStrategy, requestPatternBuilder);
     }
 
     @Override
@@ -378,6 +384,21 @@ public class WireMockServer implements Container, Stubbing, Admin {
     @Override
     public FindRequestsResult findUnmatchedRequests() {
         return wireMockApp.findUnmatchedRequests();
+    }
+
+    @Override
+    public void removeServeEvent(UUID eventId) {
+        wireMockApp.removeServeEvent(eventId);
+    }
+
+    @Override
+    public FindServeEventsResult removeServeEventsMatching(RequestPattern requestPattern) {
+        return wireMockApp.removeServeEventsMatching(requestPattern);
+    }
+
+    @Override
+    public FindServeEventsResult removeServeEventsForStubsMatchingMetadata(StringValuePattern metadataPattern) {
+        return wireMockApp.removeServeEventsForStubsMatchingMetadata(metadataPattern);
     }
 
     @Override

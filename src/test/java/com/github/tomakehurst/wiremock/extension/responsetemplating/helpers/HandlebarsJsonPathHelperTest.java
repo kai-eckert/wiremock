@@ -15,6 +15,8 @@
  */
 package com.github.tomakehurst.wiremock.extension.responsetemplating.helpers;
 
+import com.github.jknack.handlebars.Context;
+import com.github.jknack.handlebars.Options;
 import com.github.tomakehurst.wiremock.common.ConsoleNotifier;
 import com.github.tomakehurst.wiremock.common.FileSource;
 import com.github.tomakehurst.wiremock.common.LocalNotifier;
@@ -22,11 +24,13 @@ import com.github.tomakehurst.wiremock.extension.Parameters;
 import com.github.tomakehurst.wiremock.extension.responsetemplating.ResponseTemplateTransformer;
 import com.github.tomakehurst.wiremock.http.Request;
 import com.github.tomakehurst.wiremock.http.ResponseDefinition;
+import com.github.tomakehurst.wiremock.testsupport.WireMatchers;
 import com.google.common.collect.ImmutableMap;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Map;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
@@ -34,18 +38,15 @@ import static com.github.tomakehurst.wiremock.matching.MockRequest.mockRequest;
 import static com.github.tomakehurst.wiremock.testsupport.NoFileSource.noFileSource;
 import static com.github.tomakehurst.wiremock.testsupport.WireMatchers.equalToJson;
 import static org.hamcrest.Matchers.*;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
 
 public class HandlebarsJsonPathHelperTest extends HandlebarsHelperTestBase {
 
     private HandlebarsJsonPathHelper helper;
-    private ResponseTemplateTransformer transformer;
 
     @Before
     public void init() {
         helper = new HandlebarsJsonPathHelper();
-        transformer = new ResponseTemplateTransformer(true);
-
         LocalNotifier.set(new ConsoleNotifier(true));
     }
 
@@ -96,8 +97,7 @@ public class HandlebarsJsonPathHelperTest extends HandlebarsHelperTestBase {
                     "    ]\n" +
                     "}"),
             aResponse()
-                .withBody("" +
-                    "{{#each (jsonPath request.body '$.items') as |item|}}{{item.name}} {{/each}}")
+                .withBody("{{#each (jsonPath request.body '$.items') as |item|}}{{item.name}} {{/each}}")
                 .build(),
             noFileSource(),
             Parameters.empty());
@@ -197,7 +197,63 @@ public class HandlebarsJsonPathHelperTest extends HandlebarsHelperTestBase {
 
     @Test
     public void rendersAMeaningfulErrorWhenJsonPathIsInvalid() {
-        testHelperError(helper, "{\"test\":\"success\"}", "$.\\test", is("[ERROR: $.\\test is not a valid JSONPath expression]"));
+        testHelperError(helper, "{\"test\":\"success\"}", "$==test", is("[ERROR: $==test is not a valid JSONPath expression]"));
+    }
+
+    @Test
+    public void rendersAnEmptyStringWhenJsonValueUndefined() {
+        testHelperError(helper, "{\"test\":\"success\"}", "$.test2", is(""));
+    }
+
+    @Test
+    public void rendersAnEmptyStringWhenJsonValueUndefinedAndOptionsEmpty() throws Exception {
+        Map<String, Object> options = ImmutableMap.<String, Object>of();
+        String output = render("{\"test\":\"success\"}", "$.test2", options);
+        assertThat(output, is(""));
+    }
+
+    @Test
+    public void rendersDefaultValueWhenJsonValueUndefined() throws Exception {
+        Map<String, Object> options = ImmutableMap.<String, Object>of(
+            "default", "0"
+        );
+        String output = render("{}", "$.test", options);
+        assertThat(output, is("0"));
+    }
+
+    @Test
+    public void rendersDefaultValueWhenJsonValueNull() throws Exception {
+        Map<String, Object> options = ImmutableMap.<String, Object>of(
+            "default", "0"
+        );
+        String output = render("{\"test\":null}", "$.test", options);
+        assertThat(output, is("0"));
+    }
+
+    @Test
+    public void ignoresDefaultWhenJsonValueEmpty() throws Exception {
+        Map<String, Object> options = ImmutableMap.<String, Object>of(
+            "default", "0"
+        );
+        String output = render("{\"test\":\"\"}", "$.test", options);
+        assertThat(output, is(""));
+    }
+
+    @Test
+    public void ignoresDefaultWhenJsonValueZero() throws Exception {
+        Map<String, Object> options = ImmutableMap.<String, Object>of(
+            "default", "1"
+        );
+        String output = render("{\"test\":0}", "$.test", options);
+        assertThat(output, is("0"));
+    }
+
+    private String render(String content, String path, Map<String, Object> options) throws IOException {
+        return helper.apply(content,
+            new Options.Builder(null, null, null, createContext(), null)
+                .setParams(new Object[] { path })
+                .setHash(options).build()
+        ).toString();
     }
 
     @Test
@@ -228,4 +284,54 @@ public class HandlebarsJsonPathHelperTest extends HandlebarsHelperTestBase {
 
         assertThat(responseDefinition.getBody(), is("abc"));
     }
+
+    @Test
+    public void returnsCorrectResultWhenSameExpressionUsedTwiceOnIdenticalDocuments() throws Exception {
+        String one = renderHelperValue(helper, "{\"test\": \"one\"}", "$.test");
+        String two = renderHelperValue(helper, "{\"test\": \"one\"}", "$.test");
+
+        assertThat(one, is("one"));
+        assertThat(two, is("one"));
+    }
+
+    @Test
+    public void returnsCorrectResultWhenSameExpressionUsedTwiceOnDifferentDocuments() throws Exception {
+        String one = renderHelperValue(helper, "{\"test\": \"one\"}", "$.test");
+        String two = renderHelperValue(helper, "{\"test\": \"two\"}", "$.test");
+
+        assertThat(one, is("one"));
+        assertThat(two, is("two"));
+    }
+
+    @Test
+    public void returnsCorrectResultWhenDifferentExpressionsUsedOnSameDocument() throws Exception {
+        int one = renderHelperValue(helper, "{\n" +
+                "  \"test\": {\n" +
+                "    \"one\": 1,\n" +
+                "    \"two\": 2\n" +
+                "  }\n" +
+                "}", "$.test.one");
+        int two = renderHelperValue(helper, "{\n" +
+                "  \"test\": {\n" +
+                "    \"one\": 1,\n" +
+                "    \"two\": 2\n" +
+                "  }\n" +
+                "}", "$.test.two");
+
+        assertThat(one, is(1));
+        assertThat(two, is(2));
+    }
+
+    @Test
+    public void helperCanBeCalledDirectlyWithoutSupplyingRenderCache() throws Exception {
+        Context context = Context.newBuilder(null).build();
+        Options options = new Options(null, null, null, context, null, null,
+                new Object[] { "$.stuff" }, null, new ArrayList<String>(0));
+
+        Object result = helper.apply("{\"stuff\":1}", options);
+
+        assertThat(result, instanceOf(Integer.class));
+        assertThat((Integer) result, is(1));
+    }
+
 }

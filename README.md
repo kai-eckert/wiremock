@@ -1,7 +1,7 @@
 WireMock - a web service test double for all occasions
 ======================================================
 
-[![Build Status](https://travis-ci.org/tomakehurst/wiremock.svg?branch=master)](https://travis-ci.org/tomakehurst/wiremock)
+[![Build Status](https://github.com/tomakehurst/wiremock/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/tomakehurst/wiremock/actions/workflows/build-and-test.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/com.github.tomakehurst/wiremock.svg)](https://search.maven.org/artifact/com.github.tomakehurst/wiremock)
 
 
@@ -49,8 +49,14 @@ To run all of WireMock's tests:
 
 To build both JARs (thin and standalone):
 ```bash
-./gradlew -c release-settings.gradle :java8:shadowJar
+./gradlew jar shadowJar 
 ```
 
-The built JAR will be placed under ``java8/build/libs``.
+The built JAR will be placed under ``build/libs``.
+
+To publish both JARs to your local Maven repository:
+
+```bash
+./gradlew publishToMavenLocal
+```
 
